@@ -1,6 +1,15 @@
 import json
+import re
 import uuid
+from html import unescape
+from io import BytesIO
 from pathlib import Path
+
+from docx import Document
+from docx.enum.section import WD_ORIENT
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt
 
 
 def default_answer(index: int) -> dict:
@@ -173,3 +182,147 @@ def save_quiz_to_path(preview_text: str, save_path: str) -> Path:
 	path.parent.mkdir(parents=True, exist_ok=True)
 	path.write_text(preview_text, encoding="utf-8")
 	return path
+
+
+def _html_to_text(raw_html: str) -> str:
+	text = str(raw_html or "")
+	text = re.sub(r"(?i)<br\\s*/?>", "\n", text)
+	text = re.sub(r"(?i)</(p|div|h[1-6]|li|tr)>", "\n", text)
+	text = re.sub(r"(?i)<li[^>]*>", "- ", text)
+	text = re.sub(r"<[^>]+>", "", text)
+	text = unescape(text)
+	text = text.replace("\r\n", "\n").replace("\r", "\n")
+	text = re.sub(r"\n{3,}", "\n\n", text)
+	return text.strip()
+
+
+def _flatten_questions(quiz_payload: dict) -> list[tuple[int, str, dict]]:
+	flattened = []
+	number = 1
+
+	for group_index, group in enumerate(quiz_payload.get("question_groups", [])):
+		group_title = str(group.get("title") or f"Question Group {group_index + 1}")
+		for question in group.get("questions", []):
+			flattened.append((number, group_title, question))
+			number += 1
+
+	return flattened
+
+
+def _greedy_paginate_questions(flattened_questions: list[tuple[int, str, dict]], questions_per_page: int) -> list[list[tuple[int, str, dict]]]:
+	per_page = max(1, int(questions_per_page or 1))
+	pages: list[list[tuple[int, str, dict]]] = []
+	current_page: list[tuple[int, str, dict]] = []
+
+	for question_entry in flattened_questions:
+		if len(current_page) >= per_page:
+			pages.append(current_page)
+			current_page = []
+		current_page.append(question_entry)
+
+	if current_page:
+		pages.append(current_page)
+
+	return pages
+
+
+def estimate_docx_sheet_count(quiz_payload: dict, questions_per_page: int) -> int:
+	flattened_questions = _flatten_questions(quiz_payload)
+	if not flattened_questions:
+		return 1
+	return len(_greedy_paginate_questions(flattened_questions, questions_per_page))
+
+
+def _apply_orientation(document: Document, orientation: str) -> None:
+	section = document.sections[0]
+	normalized = str(orientation or "portrait").strip().lower()
+
+	# Slightly tighter margins allow more content while remaining printable.
+	section.top_margin = Inches(0.5)
+	section.bottom_margin = Inches(0.5)
+	section.left_margin = Inches(0.45)
+	section.right_margin = Inches(0.45)
+
+	cols_nodes = section._sectPr.xpath("./w:cols")
+	if cols_nodes:
+		cols = cols_nodes[0]
+	else:
+		cols = OxmlElement("w:cols")
+		section._sectPr.append(cols)
+
+	if normalized.startswith("land"):
+		section.orientation = WD_ORIENT.LANDSCAPE
+		if section.page_width < section.page_height:
+			section.page_width, section.page_height = section.page_height, section.page_width
+		cols.set(qn("w:num"), "3")
+		cols.set(qn("w:space"), "240")
+	else:
+		section.orientation = WD_ORIENT.PORTRAIT
+		if section.page_width > section.page_height:
+			section.page_width, section.page_height = section.page_height, section.page_width
+		cols.set(qn("w:num"), "1")
+
+
+def build_docx_export(quiz_payload: dict, orientation: str, questions_per_page: int) -> bytes:
+	document = Document()
+	_apply_orientation(document, orientation)
+
+	quiz_title = str(quiz_payload.get("quiz_title") or "Untitled Quiz")
+	document.add_heading(quiz_title, level=1)
+	document.add_paragraph("ID: ____________________    Name: ____________________    Date: ____________________")
+	document.add_paragraph("")
+
+	flattened_questions = _flatten_questions(quiz_payload)
+	pages = _greedy_paginate_questions(flattened_questions, questions_per_page)
+
+	if not flattened_questions:
+		document.add_paragraph("No questions available.")
+	else:
+		for page_index, page_questions in enumerate(pages):
+			current_group = None
+			for question_number, group_title, question in page_questions:
+				if group_title != current_group:
+					group_paragraph = document.add_paragraph(group_title, style="Heading 2")
+					group_paragraph.paragraph_format.keep_with_next = True
+					group_paragraph.paragraph_format.keep_together = True
+					current_group = group_title
+
+				question_title = str(question.get("title") or f"Question {question_number}")
+				points = int(question.get("points", 0) or 0)
+
+				heading = document.add_paragraph()
+				heading.add_run(f"{question_number}. {question_title}").bold = True
+				if points > 0:
+					heading.add_run(f" ({points} pts)")
+				heading.paragraph_format.keep_with_next = True
+				heading.paragraph_format.keep_together = True
+
+				question_text = _html_to_text(question.get("question_text", ""))
+				if question_text:
+					question_text_paragraph = document.add_paragraph(question_text)
+					question_text_paragraph.paragraph_format.keep_with_next = True
+					question_text_paragraph.paragraph_format.keep_together = True
+
+				answer_paragraphs = []
+				for answer_index, answer in enumerate(question.get("answers", [])):
+					marker = chr(ord("A") + answer_index) if answer_index < 26 else str(answer_index + 1)
+					answer_text = _html_to_text(answer.get("text", ""))
+					answer_paragraph = document.add_paragraph(f"{marker}. {answer_text}")
+					answer_paragraph.paragraph_format.space_before = Pt(0)
+					answer_paragraph.paragraph_format.space_after = Pt(1)
+					answer_paragraph.paragraph_format.keep_together = True
+					answer_paragraphs.append(answer_paragraph)
+
+				for answer_paragraph in answer_paragraphs[:-1]:
+					answer_paragraph.paragraph_format.keep_with_next = True
+
+				spacer = document.add_paragraph("")
+				spacer.paragraph_format.space_before = Pt(0)
+				spacer.paragraph_format.space_after = Pt(2)
+
+			if page_index < len(pages) - 1:
+				document.add_page_break()
+
+	buffer = BytesIO()
+	document.save(buffer)
+	return buffer.getvalue()

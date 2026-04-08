@@ -2,8 +2,10 @@ import streamlit as st
 
 from lib.qti import build_canvas_qti12_zip, parse_qti12_zip, qti_safe_ident
 from lib.quiz import (
+	build_docx_export,
 	default_answer,
 	default_question,
+	estimate_docx_sheet_count,
 	export_quiz_payload,
 	load_json_text,
 	normalize_quiz,
@@ -236,7 +238,8 @@ st.session_state.json_box = preview_text
 st.sidebar.header("Quiz JSON")
 st.sidebar.text_area("Quiz JSON", key="json_box", height=420, label_visibility="collapsed")
 
-qti_zip_data, qti_summary = build_canvas_qti12_zip(export_quiz_payload(st.session_state.quiz_data))
+quiz_payload = export_quiz_payload(st.session_state.quiz_data)
+qti_zip_data, qti_summary = build_canvas_qti12_zip(quiz_payload)
 
 col_apply, col_dl = st.sidebar.columns(2)
 with col_apply:
@@ -264,6 +267,48 @@ st.sidebar.download_button(
 	mime="application/zip",
 	use_container_width=True,
 )
+
+
+@st.dialog("Export Quiz to DOCX")
+def show_docx_export_dialog() -> None:
+	st.caption("Orientation: Portrait = Vertical, Landscape = Horizontal")
+	orientation = st.radio(
+		"Document orientation",
+		options=["Portrait", "Landscape"],
+		key="docx_orientation",
+		horizontal=True,
+	)
+	questions_per_page = int(
+		st.number_input(
+			"Questions per page",
+			min_value=1,
+			step=1,
+			key="docx_questions_per_page",
+		)
+	)
+
+	estimated_sheets = estimate_docx_sheet_count(quiz_payload, questions_per_page)
+	st.info(f"Estimated sheets: {estimated_sheets}")
+
+	docx_data = build_docx_export(quiz_payload, orientation=orientation, questions_per_page=questions_per_page)
+	st.download_button(
+		label="Download DOCX",
+		data=docx_data,
+		file_name=f"{qti_safe_ident(st.session_state.quiz_data.get('assessment_id', 'quiz'), 'quiz')}.docx",
+		mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		use_container_width=True,
+	)
+
+	if st.button("Close", use_container_width=True):
+		st.session_state.show_docx_dialog = False
+		st.rerun()
+
+
+if st.sidebar.button("Export to DOCX", use_container_width=True):
+	st.session_state.show_docx_dialog = True
+
+if st.session_state.show_docx_dialog:
+	show_docx_export_dialog()
 
 st.sidebar.caption(
 	f"QTI export: {qti_summary['exported_count']} question(s) included, {qti_summary['skipped_count']} skipped."

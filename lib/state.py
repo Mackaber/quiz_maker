@@ -49,3 +49,12 @@ def initialize_session_state() -> None:
 
 	if "editor_version" not in st.session_state:
 		st.session_state.editor_version = 0
+
+	if "show_docx_dialog" not in st.session_state:
+		st.session_state.show_docx_dialog = False
+
+	if "docx_orientation" not in st.session_state:
+		st.session_state.docx_orientation = "Portrait"
+
+	if "docx_questions_per_page" not in st.session_state:
+		st.session_state.docx_questions_per_page = 5
