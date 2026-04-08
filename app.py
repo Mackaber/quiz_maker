@@ -444,6 +444,232 @@ def build_canvas_qti12_zip(quiz_payload: dict) -> tuple[bytes, dict]:
 	}
 
 
+def parse_qti12_zip(data: bytes) -> dict:
+	"""Reverse of build_canvas_qti12_zip: parse a QTI 1.2 zip and return a
+	normalize_quiz-compatible dict.
+	"""
+	NS = QTI12_NAMESPACE
+
+	def tag(name: str) -> str:
+		return f"{{{NS}}}{name}"
+
+	def find_text(el: ET.Element, *path: str) -> str:
+		"""Walk a sequence of namespaced child tags and return the text of the
+		final element, or '' if any step is missing."""
+		current = el
+		for step in path:
+			current = current.find(tag(step))
+			if current is None:
+				return ""
+		return (current.text or "").strip()
+
+	with zipfile.ZipFile(BytesIO(data)) as zf:
+		names = zf.namelist()
+		names_lower = {n.lower(): n for n in names}
+
+		assessment_filename: str | None = None
+
+		# 1. Consult imsmanifest.xml for the resource with type imsqti_xmlv1p2.
+		if "imsmanifest.xml" in names_lower:
+			try:
+				manifest_root = ET.fromstring(zf.read(names_lower["imsmanifest.xml"]))
+				# Strip any namespace from manifest tags for robust matching.
+				for el in manifest_root.iter():
+					if "}" in el.tag:
+						el.tag = el.tag.split("}", 1)[1]
+				for resource in manifest_root.iter("resource"):
+					rtype = resource.get("type", "")
+					if "qti" in rtype.lower():
+						href = resource.get("href", "")
+						# Normalise path separators.
+						href_norm = href.replace("\\", "/")
+						# Find the matching entry in the zip (case-insensitive).
+						matched = next(
+							(n for n in names if n.replace("\\", "/") == href_norm),
+							next((n for n in names if n.replace("\\", "/").lower() == href_norm.lower()), None),
+						)
+						if matched:
+							assessment_filename = matched
+							break
+			except Exception:
+				pass  # Fall through to heuristic search.
+
+		# 2. Heuristic fallback: prefer a file literally named assessment.xml,
+		#    then any non-manifest, non-meta .xml file.
+		if assessment_filename is None:
+			assessment_filename = next(
+				(n for n in names if n.lower().endswith("/assessment.xml") or n.lower() == "assessment.xml"),
+				next(
+					(
+						n for n in names
+						if n.lower() != "imsmanifest.xml"
+						and not n.lower().endswith("assessment_meta.xml")
+						and n.lower().endswith(".xml")
+					),
+					None,
+				),
+			)
+
+		if assessment_filename is None:
+			raise ValueError("No QTI assessment XML found in the zip.")
+		xml_bytes = zf.read(assessment_filename)
+
+	root = ET.fromstring(xml_bytes)
+
+	# The root may be <questestinterop> or another wrapper; search all descendants.
+	assessment = root if root.tag == tag("assessment") else root.find(tag("assessment"))
+	if assessment is None:
+		# Try a full-tree search (handles unexpected wrapper elements).
+		assessment = next(
+			(el for el in root.iter() if el.tag == tag("assessment")),
+			None,
+		)
+	if assessment is None:
+		raise ValueError("<assessment> element not found in QTI XML.")
+
+	assessment_id = assessment.get("ident", f"quiz_{uuid.uuid4().hex[:8]}")
+	quiz_title = assessment.get("title", "Imported Quiz")
+
+	# Navigate to the root section then iterate group sections.
+	root_section = assessment.find(tag("section"))
+	if root_section is None:
+		raise ValueError("Root <section> not found in QTI XML.")
+
+	question_groups = []
+
+	for group_section in root_section.findall(tag("section")):
+		group_title = group_section.get("title", "Question Group")
+
+		# Optional pick_count / points_per_item
+		group_extra: dict = {}
+		sel_ord = group_section.find(tag("selection_ordering"))
+		if sel_ord is not None:
+			sel = sel_ord.find(tag("selection"))
+			if sel is not None:
+				sel_num_text = find_text(sel, "selection_number")
+				if sel_num_text:
+					try:
+						group_extra["pick_count"] = int(sel_num_text)
+					except ValueError:
+						pass
+				sel_ext = sel.find(tag("selection_extension"))
+				if sel_ext is not None:
+					ppi_text = find_text(sel_ext, "points_per_item")
+					if ppi_text:
+						try:
+							group_extra["points_per_item"] = float(ppi_text)
+						except ValueError:
+							pass
+
+		questions = []
+
+		for item in group_section.findall(tag("item")):
+			item_id = item.get("ident", f"q_{uuid.uuid4().hex[:8]}")
+			item_title = item.get("title", "")
+
+			# Metadata: points_possible and question_type
+			points = 0
+			question_type_raw = "multiple_choice"
+			qtimeta = item.find(f"{tag('itemmetadata')}/{tag('qtimetadata')}")
+			if qtimeta is not None:
+				for field in qtimeta.findall(tag("qtimetadatafield")):
+					label = find_text(field, "fieldlabel")
+					entry = find_text(field, "fieldentry")
+					if label == "points_possible":
+						try:
+							points = int(float(entry))
+						except ValueError:
+							pass
+					elif label == "question_type":
+						if entry == "multiple_choice_question":
+							question_type_raw = "multiple_choice"
+						elif entry == "multiple_answers_question":
+							question_type_raw = "multiple_answers"
+						else:
+							question_type_raw = entry
+
+			# Question text
+			presentation = item.find(tag("presentation"))
+			question_text = ""
+			if presentation is not None:
+				q_material = presentation.find(tag("material"))
+				if q_material is not None:
+					mattext = q_material.find(tag("mattext"))
+					if mattext is not None:
+						question_text = (mattext.text or "").strip()
+
+			# Answers
+			answers = []
+			if presentation is not None:
+				response_lid = presentation.find(tag("response_lid"))
+				if response_lid is not None:
+					render_choice = response_lid.find(tag("render_choice"))
+					if render_choice is not None:
+						for resp_label in render_choice.findall(tag("response_label")):
+							ans_ident = resp_label.get("ident", f"ans_{uuid.uuid4().hex[:8]}")
+							ans_material = resp_label.find(tag("material"))
+							ans_text = ""
+							if ans_material is not None:
+								ans_mattext = ans_material.find(tag("mattext"))
+								if ans_mattext is not None:
+									ans_text = (ans_mattext.text or "").strip()
+							answers.append({"id": ans_ident, "text": ans_text})
+
+			# Correct answer idents from respcondition/conditionvar
+			correct_idents: list[str] = []
+			resprocessing = item.find(tag("resprocessing"))
+			if resprocessing is not None:
+				for respcond in resprocessing.findall(tag("respcondition")):
+					conditionvar = respcond.find(tag("conditionvar"))
+					if conditionvar is None:
+						continue
+					# Single mode: direct varequal children
+					for ve in conditionvar.findall(tag("varequal")):
+						val = (ve.text or "").strip()
+						if val:
+							correct_idents.append(val)
+					# Multiple mode: varequal inside <and> but not inside <not>
+					and_node = conditionvar.find(tag("and"))
+					if and_node is not None:
+						for child in and_node:
+							if child.tag == tag("varequal"):
+								val = (child.text or "").strip()
+								if val:
+									correct_idents.append(val)
+							# skip <not> children — those are incorrect answers
+
+			# Feedback
+			feedback = ""
+			itemfeedback = item.find(tag("itemfeedback"))
+			if itemfeedback is not None:
+				fb_mattext = itemfeedback.find(
+					f"{tag('flow_mat')}/{tag('material')}/{tag('mattext')}"
+				)
+				if fb_mattext is not None:
+					feedback = (fb_mattext.text or "").strip()
+
+			questions.append({
+				"id": item_id,
+				"title": item_title,
+				"question_text": question_text,
+				"question_type": question_type_raw,
+				"points": points,
+				"answers": answers,
+				"correct_answer_ids": correct_idents,
+				"feedback": feedback,
+			})
+
+		group_dict: dict = {"title": group_title, "questions": questions}
+		group_dict.update(group_extra)
+		question_groups.append(group_dict)
+
+	return {
+		"assessment_id": assessment_id,
+		"quiz_title": quiz_title,
+		"question_groups": question_groups,
+	}
+
+
 st.set_page_config(page_title="MDQ Quiz Builder", layout="wide")
 st.title("MDQ Quiz Builder")
 
@@ -468,8 +694,21 @@ if uploaded_file is not None:
 		except Exception as exc:
 			st.session_state.last_parse_error = str(exc)
 
+uploaded_qti = st.sidebar.file_uploader("Upload QTI zip", type=["zip"])
+if uploaded_qti is not None:
+	if st.sidebar.button("Load QTI", use_container_width=True):
+		try:
+			parsed = parse_qti12_zip(uploaded_qti.getvalue())
+			normalized = normalize_quiz(parsed)
+			set_quiz(normalized)
+			st.session_state.last_parse_error = ""
+			st.sidebar.success("QTI zip loaded.")
+			st.rerun()
+		except Exception as exc:
+			st.session_state.last_parse_error = str(exc)
+
 if st.session_state.last_parse_error:
-	st.sidebar.error(f"Invalid JSON: {st.session_state.last_parse_error}")
+	st.sidebar.error(f"Import error: {st.session_state.last_parse_error}")
 
 
 show_ids = st.toggle("Show IDs", value=st.session_state.show_ids, key="show_ids")
