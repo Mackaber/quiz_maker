@@ -1,4 +1,5 @@
 import json
+import random
 import re
 import uuid
 from html import unescape
@@ -39,6 +40,7 @@ def default_quiz() -> dict:
 		"question_groups": [
 			{
 				"title": "Question Group 1",
+				"questions_to_select": 1,
 				"questions": [default_question(0)],
 			}
 		],
@@ -67,6 +69,7 @@ def normalize_quiz(payload: dict) -> dict:
 
 		normalized_group = {
 			"title": group_title,
+			"questions_to_select": None,
 			"questions": [],
 		}
 
@@ -127,6 +130,17 @@ def normalize_quiz(payload: dict) -> dict:
 			}
 			normalized_group["questions"].append(normalized_question)
 
+		raw_questions_to_select = group.get("questions_to_select")
+		if raw_questions_to_select is None:
+			normalized_group["questions_to_select"] = len(normalized_group["questions"])
+		else:
+			try:
+				normalized_group["questions_to_select"] = int(raw_questions_to_select)
+			except (TypeError, ValueError) as exc:
+				raise ValueError(
+					f"'questions_to_select' in group {group_index + 1} must be a whole number."
+				) from exc
+
 		normalized["question_groups"].append(normalized_group)
 
 	return normalized
@@ -140,12 +154,21 @@ def export_quiz_payload(quiz: dict) -> dict:
 	}
 
 	for group in quiz.get("question_groups", []):
+		group_questions = group.get("questions", [])
+		default_select_count = len(group_questions)
+		raw_select_count = group.get("questions_to_select", default_select_count)
+		try:
+			select_count = int(raw_select_count)
+		except (TypeError, ValueError):
+			select_count = default_select_count
+
 		out_group = {
 			"title": group.get("title", ""),
+			"questions_to_select": select_count,
 			"questions": [],
 		}
 
-		for question in group.get("questions", []):
+		for question in group_questions:
 			out_question = {
 				"id": question.get("id", ""),
 				"title": question.get("title", ""),
@@ -209,6 +232,50 @@ def _flatten_questions(quiz_payload: dict) -> list[tuple[int, str, dict]]:
 	return flattened
 
 
+def _group_selection_count(group: dict, group_index: int) -> int:
+	group_questions = group.get("questions", [])
+	available = len(group_questions)
+	raw_count = group.get("questions_to_select", available)
+
+	try:
+		count = int(raw_count)
+	except (TypeError, ValueError) as exc:
+		raise ValueError(
+			f"Group {group_index + 1} selection count must be a whole number."
+		) from exc
+
+	if count < 1:
+		raise ValueError(f"Group {group_index + 1} selection count must be at least 1.")
+	if count > available:
+		raise ValueError(
+			f"Group {group_index + 1} requests {count} question(s) but only {available} are available."
+		)
+
+	return count
+
+
+def _flatten_questions_for_permutation(quiz_payload: dict) -> list[tuple[int, str, dict]]:
+	flattened: list[tuple[int, str, dict]] = []
+	number = 1
+
+	for group_index, group in enumerate(quiz_payload.get("question_groups", [])):
+		group_title = str(group.get("title") or f"Question Group {group_index + 1}")
+		group_questions = list(group.get("questions", []))
+		pick_count = _group_selection_count(group, group_index)
+
+		if pick_count == len(group_questions):
+			selected_questions = group_questions
+		else:
+			picked_indexes = sorted(random.sample(range(len(group_questions)), pick_count))
+			selected_questions = [group_questions[index] for index in picked_indexes]
+
+		for question in selected_questions:
+			flattened.append((number, group_title, question))
+			number += 1
+
+	return flattened
+
+
 def _greedy_paginate_questions(flattened_questions: list[tuple[int, str, dict]], questions_per_page: int) -> list[list[tuple[int, str, dict]]]:
 	per_page = max(1, int(questions_per_page or 1))
 	pages: list[list[tuple[int, str, dict]]] = []
@@ -226,11 +293,13 @@ def _greedy_paginate_questions(flattened_questions: list[tuple[int, str, dict]],
 	return pages
 
 
-def estimate_docx_sheet_count(quiz_payload: dict, questions_per_page: int) -> int:
-	flattened_questions = _flatten_questions(quiz_payload)
+def estimate_docx_sheet_count(quiz_payload: dict, questions_per_page: int, permutations: int = 1) -> int:
+	permutation_count = max(1, int(permutations or 1))
+	flattened_questions = _flatten_questions_for_permutation(quiz_payload)
 	if not flattened_questions:
-		return 1
-	return len(_greedy_paginate_questions(flattened_questions, questions_per_page))
+		return permutation_count
+	pages_per_permutation = len(_greedy_paginate_questions(flattened_questions, questions_per_page))
+	return pages_per_permutation * permutation_count
 
 
 def _apply_orientation(document: Document, orientation: str) -> None:
@@ -263,21 +332,28 @@ def _apply_orientation(document: Document, orientation: str) -> None:
 		cols.set(qn("w:num"), "1")
 
 
-def build_docx_export(quiz_payload: dict, orientation: str, questions_per_page: int) -> bytes:
+def build_docx_export(quiz_payload: dict, orientation: str, questions_per_page: int, permutations: int = 1) -> bytes:
 	document = Document()
 	_apply_orientation(document, orientation)
 
 	quiz_title = str(quiz_payload.get("quiz_title") or "Untitled Quiz")
-	document.add_heading(quiz_title, level=1)
-	document.add_paragraph("ID: ____________________    Name: ____________________    Date: ____________________")
-	document.add_paragraph("")
+	permutation_count = max(1, int(permutations or 1))
 
-	flattened_questions = _flatten_questions(quiz_payload)
-	pages = _greedy_paginate_questions(flattened_questions, questions_per_page)
+	for permutation_index in range(permutation_count):
+		if permutation_index > 0:
+			document.add_page_break()
 
-	if not flattened_questions:
-		document.add_paragraph("No questions available.")
-	else:
+		document.add_heading(quiz_title, level=1)
+		document.add_paragraph("Student ID: ____________________    Name: ____________________    Date: ____________________")
+		document.add_paragraph("")
+
+		flattened_questions = _flatten_questions_for_permutation(quiz_payload)
+		pages = _greedy_paginate_questions(flattened_questions, questions_per_page)
+
+		if not flattened_questions:
+			document.add_paragraph("No questions available.")
+			continue
+
 		for page_index, page_questions in enumerate(pages):
 			current_group = None
 			for question_number, group_title, question in page_questions:

@@ -5,6 +5,7 @@ from lib.quiz import default_quiz
 
 EDITOR_WIDGET_PREFIXES = (
 	"group_title_",
+	"group_select_count_",
 	"q_id_",
 	"q_title_",
 	"q_type_",
@@ -58,3 +59,6 @@ def initialize_session_state() -> None:
 
 	if "docx_questions_per_page" not in st.session_state:
 		st.session_state.docx_questions_per_page = 5
+
+	if "docx_permutations" not in st.session_state:
+		st.session_state.docx_permutations = 1

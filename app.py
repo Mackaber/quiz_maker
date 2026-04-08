@@ -70,6 +70,7 @@ with add_group_col:
 		quiz["question_groups"].append(
 			{
 				"title": f"Question Group {len(quiz['question_groups']) + 1}",
+				"questions_to_select": 1,
 				"questions": [default_question(0)],
 			}
 		)
@@ -79,7 +80,7 @@ with add_group_col:
 
 for group_index, group in enumerate(quiz["question_groups"]):
 	with st.expander(f"Group {group_index + 1}: {group['title']}", expanded=True):
-		group_head_col1, group_head_col2 = st.columns([4, 1])
+		group_head_col1, group_head_col2, group_head_col3 = st.columns([3, 1, 1])
 		with group_head_col1:
 			group["title"] = st.text_input(
 				"Group title",
@@ -87,6 +88,27 @@ for group_index, group in enumerate(quiz["question_groups"]):
 				key=editor_key(f"group_title_{group_index}"),
 			)
 		with group_head_col2:
+			question_count = len(group["questions"])
+			max_selectable = max(1, question_count)
+			raw_select_count = group.get("questions_to_select", question_count or 1)
+			try:
+				default_select_count = int(raw_select_count)
+			except (TypeError, ValueError):
+				default_select_count = question_count or 1
+			default_select_count = max(1, min(default_select_count, max_selectable))
+
+			group["questions_to_select"] = int(
+				st.number_input(
+					"Select",
+					min_value=1,
+					max_value=max_selectable,
+					step=1,
+					value=default_select_count,
+					key=editor_key(f"group_select_count_{group_index}"),
+				)
+			)
+			st.caption(f"/ {question_count} available")
+		with group_head_col3:
 			st.write("")
 			if st.button("Remove Group", key=editor_key(f"remove_group_{group_index}")):
 				del quiz["question_groups"][group_index]
@@ -269,6 +291,30 @@ st.sidebar.download_button(
 )
 
 
+def collect_docx_export_errors(quiz_for_export: dict) -> list[str]:
+	errors: list[str] = []
+	for group_index, group in enumerate(quiz_for_export.get("question_groups", []), start=1):
+		questions = group.get("questions", [])
+		available = len(questions)
+		group_title = str(group.get("title") or f"Group {group_index}")
+		raw_requested = group.get("questions_to_select", available)
+
+		try:
+			requested = int(raw_requested)
+		except (TypeError, ValueError):
+			errors.append(f"{group_title}: selection count must be a whole number.")
+			continue
+
+		if requested < 1:
+			errors.append(f"{group_title}: selection count must be at least 1.")
+		if requested > available:
+			errors.append(
+				f"{group_title}: requested {requested} question(s), but only {available} available."
+			)
+
+	return errors
+
+
 @st.dialog("Export Quiz to DOCX")
 def show_docx_export_dialog() -> None:
 	st.caption("Orientation: Portrait = Vertical, Landscape = Horizontal")
@@ -286,11 +332,38 @@ def show_docx_export_dialog() -> None:
 			key="docx_questions_per_page",
 		)
 	)
+	permutations = int(
+		st.number_input(
+			"Permutations",
+			min_value=1,
+			step=1,
+			key="docx_permutations",
+		)
+	)
 
-	estimated_sheets = estimate_docx_sheet_count(quiz_payload, questions_per_page)
+	errors = collect_docx_export_errors(quiz_payload)
+	if errors:
+		st.error("DOCX export blocked due to invalid group selections:")
+		for error in errors:
+			st.write(f"- {error}")
+		if st.button("Close", use_container_width=True):
+			st.session_state.show_docx_dialog = False
+			st.rerun()
+		return
+
+	estimated_sheets = estimate_docx_sheet_count(
+		quiz_payload,
+		questions_per_page,
+		permutations=permutations,
+	)
 	st.info(f"Estimated sheets: {estimated_sheets}")
 
-	docx_data = build_docx_export(quiz_payload, orientation=orientation, questions_per_page=questions_per_page)
+	docx_data = build_docx_export(
+		quiz_payload,
+		orientation=orientation,
+		questions_per_page=questions_per_page,
+		permutations=permutations,
+	)
 	st.download_button(
 		label="Download DOCX",
 		data=docx_data,
@@ -305,7 +378,12 @@ def show_docx_export_dialog() -> None:
 
 
 if st.sidebar.button("Export to DOCX", use_container_width=True):
-	st.session_state.show_docx_dialog = True
+	docx_errors = collect_docx_export_errors(quiz_payload)
+	if docx_errors:
+		for error in docx_errors:
+			st.sidebar.error(error)
+	else:
+		st.session_state.show_docx_dialog = True
 
 if st.session_state.show_docx_dialog:
 	show_docx_export_dialog()
