@@ -182,81 +182,38 @@ st.title("MDQ Quiz Builder")
 if "quiz_data" not in st.session_state:
 	set_quiz(default_quiz())
 
-if "json_input_text" not in st.session_state:
-	st.session_state.json_input_text = refresh_preview()
-
 if "last_parse_error" not in st.session_state:
 	st.session_state.last_parse_error = ""
 
+if "show_ids" not in st.session_state:
+	st.session_state.show_ids = False
 
-st.sidebar.header("JSON Input")
+
 uploaded_file = st.sidebar.file_uploader("Upload quiz JSON", type=["json"])
 if uploaded_file is not None:
 	if st.sidebar.button("Load Uploaded JSON", use_container_width=True):
 		try:
 			file_text = uploaded_file.getvalue().decode("utf-8")
 			load_json_text(file_text)
-			st.session_state.json_input_text = refresh_preview()
 			st.sidebar.success("Uploaded JSON loaded.")
 			st.rerun()
 		except Exception as exc:
 			st.session_state.last_parse_error = str(exc)
 
-st.session_state.json_input_text = st.sidebar.text_area(
-	"Paste or edit JSON",
-	value=st.session_state.json_input_text,
-	height=280,
-	key="json_text_area",
-)
-
-if st.sidebar.button("Apply JSON", use_container_width=True):
-	try:
-		load_json_text(st.session_state.json_input_text)
-		st.session_state.json_input_text = refresh_preview()
-		st.sidebar.success("JSON applied.")
-		st.rerun()
-	except Exception as exc:
-		st.session_state.last_parse_error = str(exc)
-
 if st.session_state.last_parse_error:
 	st.sidebar.error(f"Invalid JSON: {st.session_state.last_parse_error}")
 
-preview_text = refresh_preview()
-st.sidebar.header("Live JSON Output")
-st.sidebar.text_area(
-	"Current quiz JSON",
-	value=preview_text,
-	height=320,
-	key="json_output_preview",
-	disabled=True,
-)
-st.sidebar.download_button(
-	label="Download JSON",
-	data=preview_text,
-	file_name=f"{st.session_state.quiz_data.get('assessment_id', 'quiz')}.json",
-	mime="application/json",
-	use_container_width=True,
-)
 
-save_path = st.sidebar.text_input("Save to file path (optional)", value="")
-if st.sidebar.button("Save JSON To Path", use_container_width=True):
-	if not save_path.strip():
-		st.sidebar.warning("Enter a path before saving.")
-	else:
-		try:
-			path = Path(save_path).expanduser()
-			path.parent.mkdir(parents=True, exist_ok=True)
-			path.write_text(preview_text, encoding="utf-8")
-			st.sidebar.success(f"Saved to {path}")
-		except Exception as exc:
-			st.sidebar.error(f"Save failed: {exc}")
-
+show_ids = st.toggle("Show IDs", value=st.session_state.show_ids, key="show_ids")
 
 quiz = st.session_state.quiz_data
-meta_col1, meta_col2 = st.columns(2)
-with meta_col1:
-	quiz["assessment_id"] = st.text_input("Assessment ID", value=quiz["assessment_id"])
-with meta_col2:
+if show_ids:
+	meta_col1, meta_col2 = st.columns(2)
+	with meta_col1:
+		quiz["assessment_id"] = st.text_input("Assessment ID", value=quiz["assessment_id"])
+	with meta_col2:
+		quiz["quiz_title"] = st.text_input("Quiz Title", value=quiz["quiz_title"])
+else:
 	quiz["quiz_title"] = st.text_input("Quiz Title", value=quiz["quiz_title"])
 
 st.caption(
@@ -299,24 +256,38 @@ for group_index, group in enumerate(quiz["question_groups"]):
 			st.markdown("---")
 			st.subheader(f"Question {question_index + 1}")
 
-			q_col1, q_col2, q_col3 = st.columns([2, 2, 1])
-			with q_col1:
-				question["id"] = st.text_input(
-					"Question ID",
-					value=question["id"],
-					key=f"q_id_{group_index}_{question_index}",
-				)
-			with q_col2:
-				question["title"] = st.text_input(
-					"Question Title",
-					value=question["title"],
-					key=f"q_title_{group_index}_{question_index}",
-				)
-			with q_col3:
-				st.write("")
-				if st.button("Remove Question", key=f"remove_question_{group_index}_{question_index}"):
-					del group["questions"][question_index]
-					st.rerun()
+			if show_ids:
+				q_col1, q_col2, q_col3 = st.columns([2, 2, 1])
+				with q_col1:
+					question["id"] = st.text_input(
+						"Question ID",
+						value=question["id"],
+						key=f"q_id_{group_index}_{question_index}",
+					)
+				with q_col2:
+					question["title"] = st.text_input(
+						"Question Title",
+						value=question["title"],
+						key=f"q_title_{group_index}_{question_index}",
+					)
+				with q_col3:
+					st.write("")
+					if st.button("Remove Question", key=f"remove_question_{group_index}_{question_index}"):
+						del group["questions"][question_index]
+						st.rerun()
+			else:
+				q_col2, q_col3 = st.columns([3, 1])
+				with q_col2:
+					question["title"] = st.text_input(
+						"Question Title",
+						value=question["title"],
+						key=f"q_title_{group_index}_{question_index}",
+					)
+				with q_col3:
+					st.write("")
+					if st.button("Remove Question", key=f"remove_question_{group_index}_{question_index}"):
+						del group["questions"][question_index]
+						st.rerun()
 
 			q_col4, q_col5 = st.columns([2, 1])
 			with q_col4:
@@ -352,19 +323,28 @@ for group_index, group in enumerate(quiz["question_groups"]):
 			]
 
 			for answer_index, answer in enumerate(question["answers"]):
-				a_col1, a_col2, a_col3, a_col4 = st.columns([2, 3, 1, 1])
-				with a_col1:
-					answer["id"] = st.text_input(
-						"Answer ID",
-						value=answer["id"],
-						key=f"a_id_{group_index}_{question_index}_{answer_index}",
-					)
-				with a_col2:
-					answer["text"] = st.text_input(
-						"Answer Text",
-						value=answer["text"],
-						key=f"a_text_{group_index}_{question_index}_{answer_index}",
-					)
+				if show_ids:
+					a_col1, a_col2, a_col3, a_col4 = st.columns([2, 3, 1, 1])
+					with a_col1:
+						answer["id"] = st.text_input(
+							"Answer ID",
+							value=answer["id"],
+							key=f"a_id_{group_index}_{question_index}_{answer_index}",
+						)
+					with a_col2:
+						answer["text"] = st.text_input(
+							"Answer Text",
+							value=answer["text"],
+							key=f"a_text_{group_index}_{question_index}_{answer_index}",
+						)
+				else:
+					a_col2, a_col3, a_col4 = st.columns([5, 1, 1])
+					with a_col2:
+						answer["text"] = st.text_input(
+							"Answer Text",
+							value=answer["text"],
+							key=f"a_text_{group_index}_{question_index}_{answer_index}",
+						)
 				with a_col3:
 					is_correct = answer["id"] in question["correct_answer_ids"]
 					marked = st.checkbox(
@@ -400,3 +380,44 @@ for group_index, group in enumerate(quiz["question_groups"]):
 			)
 
 st.session_state.quiz_data = quiz
+
+# Single JSON box — always reflects current quiz state AND accepts paste+apply imports.
+# We capture whatever was in the box from the previous interaction BEFORE overwriting,
+# so Apply JSON can still read a user-pasted value even though we force the live preview.
+preview_text = refresh_preview()
+user_input = st.session_state.get("json_box", preview_text)
+st.session_state.json_box = preview_text
+
+st.sidebar.header("Quiz JSON")
+st.sidebar.text_area("Quiz JSON", key="json_box", height=420, label_visibility="collapsed")
+
+col_apply, col_dl = st.sidebar.columns(2)
+with col_apply:
+	if st.button("Apply JSON", use_container_width=True):
+		try:
+			load_json_text(user_input)
+			st.session_state.last_parse_error = ""
+			st.rerun()
+		except Exception as exc:
+			st.session_state.last_parse_error = str(exc)
+with col_dl:
+	st.sidebar.download_button(
+		label="Download",
+		data=preview_text,
+		file_name=f"{st.session_state.quiz_data.get('assessment_id', 'quiz')}.json",
+		mime="application/json",
+		use_container_width=True,
+	)
+
+save_path = st.sidebar.text_input("Save to file path (optional)", value="")
+if st.sidebar.button("Save to path", use_container_width=True):
+	if not save_path.strip():
+		st.sidebar.warning("Enter a path before saving.")
+	else:
+		try:
+			path = Path(save_path).expanduser()
+			path.parent.mkdir(parents=True, exist_ok=True)
+			path.write_text(preview_text, encoding="utf-8")
+			st.sidebar.success(f"Saved to {path}")
+		except Exception as exc:
+			st.sidebar.error(f"Save failed: {exc}")
