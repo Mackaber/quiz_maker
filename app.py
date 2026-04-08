@@ -50,6 +50,35 @@ def default_quiz() -> dict:
 	}
 
 
+EDITOR_WIDGET_PREFIXES = (
+	"group_title_",
+	"q_id_",
+	"q_title_",
+	"q_type_",
+	"q_points_",
+	"q_text_",
+	"q_feedback_",
+	"a_id_",
+	"a_text_",
+	"a_correct_",
+)
+
+
+def clear_editor_widget_state() -> None:
+	for key in list(st.session_state.keys()):
+		if key.startswith(EDITOR_WIDGET_PREFIXES):
+			del st.session_state[key]
+
+
+def bump_editor_version() -> None:
+	clear_editor_widget_state()
+	st.session_state.editor_version = st.session_state.get("editor_version", 0) + 1
+
+
+def editor_key(name: str) -> str:
+	return f"editor_{st.session_state.get('editor_version', 0)}_{name}"
+
+
 def normalize_quiz(payload: dict) -> dict:
 	normalized = {
 		"assessment_id": str(payload.get("assessment_id") or f"quiz_{uuid.uuid4().hex[:8]}"),
@@ -173,6 +202,7 @@ def export_quiz_payload(quiz: dict) -> dict:
 
 
 def set_quiz(quiz: dict) -> None:
+	bump_editor_version()
 	st.session_state.quiz_data = quiz
 
 
@@ -682,6 +712,9 @@ if "last_parse_error" not in st.session_state:
 if "show_ids" not in st.session_state:
 	st.session_state.show_ids = False
 
+if "editor_version" not in st.session_state:
+	st.session_state.editor_version = 0
+
 
 uploaded_file = st.sidebar.file_uploader("Upload quiz JSON", type=["json"])
 if uploaded_file is not None:
@@ -737,6 +770,7 @@ with add_group_col:
 				"questions": [default_question(0)],
 			}
 		)
+		bump_editor_version()
 		st.rerun()
 
 
@@ -747,16 +781,18 @@ for group_index, group in enumerate(quiz["question_groups"]):
 			group["title"] = st.text_input(
 				"Group title",
 				value=group["title"],
-				key=f"group_title_{group_index}",
+				key=editor_key(f"group_title_{group_index}"),
 			)
 		with group_head_col2:
 			st.write("")
-			if st.button("Remove Group", key=f"remove_group_{group_index}"):
+			if st.button("Remove Group", key=editor_key(f"remove_group_{group_index}")):
 				del quiz["question_groups"][group_index]
+				bump_editor_version()
 				st.rerun()
 
-		if st.button("Add Question", key=f"add_question_{group_index}"):
+		if st.button("Add Question", key=editor_key(f"add_question_{group_index}")):
 			group["questions"].append(default_question(len(group["questions"])))
+			bump_editor_version()
 			st.rerun()
 
 		for question_index, question in enumerate(group["questions"]):
@@ -769,18 +805,19 @@ for group_index, group in enumerate(quiz["question_groups"]):
 					question["id"] = st.text_input(
 						"Question ID",
 						value=question["id"],
-						key=f"q_id_{group_index}_{question_index}",
+						key=editor_key(f"q_id_{group_index}_{question_index}"),
 					)
 				with q_col2:
 					question["title"] = st.text_input(
 						"Question Title",
 						value=question["title"],
-						key=f"q_title_{group_index}_{question_index}",
+						key=editor_key(f"q_title_{group_index}_{question_index}"),
 					)
 				with q_col3:
 					st.write("")
-					if st.button("Remove Question", key=f"remove_question_{group_index}_{question_index}"):
+					if st.button("Remove Question", key=editor_key(f"remove_question_{group_index}_{question_index}")):
 						del group["questions"][question_index]
+						bump_editor_version()
 						st.rerun()
 			else:
 				q_col2, q_col3 = st.columns([3, 1])
@@ -788,12 +825,13 @@ for group_index, group in enumerate(quiz["question_groups"]):
 					question["title"] = st.text_input(
 						"Question Title",
 						value=question["title"],
-						key=f"q_title_{group_index}_{question_index}",
+						key=editor_key(f"q_title_{group_index}_{question_index}"),
 					)
 				with q_col3:
 					st.write("")
-					if st.button("Remove Question", key=f"remove_question_{group_index}_{question_index}"):
+					if st.button("Remove Question", key=editor_key(f"remove_question_{group_index}_{question_index}")):
 						del group["questions"][question_index]
+						bump_editor_version()
 						st.rerun()
 
 			q_col4, q_col5 = st.columns([2, 1])
@@ -801,7 +839,7 @@ for group_index, group in enumerate(quiz["question_groups"]):
 				question["question_type"] = st.text_input(
 					"Question Type",
 					value=question["question_type"],
-					key=f"q_type_{group_index}_{question_index}",
+					key=editor_key(f"q_type_{group_index}_{question_index}"),
 				)
 			with q_col5:
 				question["points"] = int(
@@ -810,14 +848,14 @@ for group_index, group in enumerate(quiz["question_groups"]):
 						min_value=0,
 						step=1,
 						value=int(question["points"]),
-						key=f"q_points_{group_index}_{question_index}",
+						key=editor_key(f"q_points_{group_index}_{question_index}"),
 					)
 				)
 
 			question["question_text"] = st.text_area(
 				"Question Text (HTML allowed)",
 				value=question["question_text"],
-				key=f"q_text_{group_index}_{question_index}",
+				key=editor_key(f"q_text_{group_index}_{question_index}"),
 				height=120,
 			)
 
@@ -836,13 +874,13 @@ for group_index, group in enumerate(quiz["question_groups"]):
 						answer["id"] = st.text_input(
 							"Answer ID",
 							value=answer["id"],
-							key=f"a_id_{group_index}_{question_index}_{answer_index}",
+							key=editor_key(f"a_id_{group_index}_{question_index}_{answer_index}"),
 						)
 					with a_col2:
 						answer["text"] = st.text_input(
 							"Answer Text",
 							value=answer["text"],
-							key=f"a_text_{group_index}_{question_index}_{answer_index}",
+							key=editor_key(f"a_text_{group_index}_{question_index}_{answer_index}"),
 						)
 				else:
 					a_col2, a_col3, a_col4 = st.columns([5, 1, 1])
@@ -850,14 +888,14 @@ for group_index, group in enumerate(quiz["question_groups"]):
 						answer["text"] = st.text_input(
 							"Answer Text",
 							value=answer["text"],
-							key=f"a_text_{group_index}_{question_index}_{answer_index}",
+							key=editor_key(f"a_text_{group_index}_{question_index}_{answer_index}"),
 						)
 				with a_col3:
 					is_correct = answer["id"] in question["correct_answer_ids"]
 					marked = st.checkbox(
 						"Correct",
 						value=is_correct,
-						key=f"a_correct_{group_index}_{question_index}_{answer_index}",
+						key=editor_key(f"a_correct_{group_index}_{question_index}_{answer_index}"),
 					)
 					if marked and answer["id"] not in question["correct_answer_ids"]:
 						question["correct_answer_ids"].append(answer["id"])
@@ -865,7 +903,7 @@ for group_index, group in enumerate(quiz["question_groups"]):
 						question["correct_answer_ids"].remove(answer["id"])
 				with a_col4:
 					st.write("")
-					if st.button("Remove", key=f"remove_answer_{group_index}_{question_index}_{answer_index}"):
+					if st.button("Remove", key=editor_key(f"remove_answer_{group_index}_{question_index}_{answer_index}")):
 						removed_id = answer["id"]
 						del question["answers"][answer_index]
 						question["correct_answer_ids"] = [
@@ -873,16 +911,18 @@ for group_index, group in enumerate(quiz["question_groups"]):
 							for answer_id in question["correct_answer_ids"]
 							if answer_id != removed_id
 						]
+						bump_editor_version()
 						st.rerun()
 
-			if st.button("Add Answer", key=f"add_answer_{group_index}_{question_index}"):
+			if st.button("Add Answer", key=editor_key(f"add_answer_{group_index}_{question_index}")):
 				question["answers"].append(default_answer(len(question["answers"])))
+				bump_editor_version()
 				st.rerun()
 
 			question["feedback"] = st.text_area(
 				"Feedback (HTML allowed)",
 				value=question["feedback"],
-				key=f"q_feedback_{group_index}_{question_index}",
+				key=editor_key(f"q_feedback_{group_index}_{question_index}"),
 				height=100,
 			)
 
@@ -906,6 +946,7 @@ with col_apply:
 		try:
 			load_json_text(user_input)
 			st.session_state.last_parse_error = ""
+			st.session_state.json_box = refresh_preview()
 			st.rerun()
 		except Exception as exc:
 			st.session_state.last_parse_error = str(exc)
