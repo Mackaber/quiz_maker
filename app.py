@@ -8,6 +8,14 @@ from xml.etree import ElementTree as ET
 
 import streamlit as st
 
+QTI12_NAMESPACE = "http://www.imsglobal.org/xsd/ims_qtiasiv1p2"
+QTI12_SCHEMA = "http://www.imsglobal.org/xsd/ims_qtiasiv1p2p1.xsd"
+XSI_NAMESPACE = "http://www.w3.org/2001/XMLSchema-instance"
+
+
+def qti12_tag(tag: str) -> str:
+	return f"{{{QTI12_NAMESPACE}}}{tag}"
+
 
 def default_answer(index: int) -> dict:
 	return {
@@ -226,7 +234,12 @@ def add_mattext(parent: ET.Element, text: str, texttype: str = "text/html") -> N
 	mattext.text = str(text or "")
 
 
-def build_qti_item(question: dict, group_index: int, question_index: int) -> ET.Element | None:
+def qti_plain_text(raw: str) -> str:
+	text = re.sub(r"<[^>]+>", " ", str(raw or ""))
+	return re.sub(r"\s+", " ", text).strip()
+
+
+def build_qti12_item(question: dict, question_index: int) -> ET.Element | None:
 	answers = question.get("answers", [])
 	correct_ids = set(question.get("correct_answer_ids", []))
 	if not answers or not correct_ids:
@@ -235,13 +248,12 @@ def build_qti_item(question: dict, group_index: int, question_index: int) -> ET.
 	mode = infer_qti_question_mode(question)
 	if mode is None:
 		return None
-
-	question_ident = qti_safe_ident(question.get("id", ""), "q")
-	title = str(question.get("title") or f"Question {question_index + 1}")
-	points = max(0, int(question.get("points", 0)))
-
 	if mode == "single" and len(correct_ids) != 1:
 		return None
+
+	item_ident = qti_safe_ident(question.get("id", ""), "q")
+	title = str(question.get("title") or f"Question {question_index + 1}")
+	points = max(0, int(question.get("points", 0)))
 
 	answer_entries = []
 	for answer_index, answer in enumerate(answers):
@@ -259,107 +271,103 @@ def build_qti_item(question: dict, group_index: int, question_index: int) -> ET.
 	if not any(a["is_correct"] for a in answer_entries):
 		return None
 
-	item = ET.Element("item", {"ident": question_ident, "title": title})
+	item = ET.Element(qti12_tag("item"), {"ident": item_ident, "title": title})
 
-	itemmetadata = ET.SubElement(item, "itemmetadata")
-	qtimetadata = ET.SubElement(itemmetadata, "qtimetadata")
-
-	q_type_entry = "multiple_choice_question" if mode == "single" else "multiple_answers_question"
+	itemmetadata = ET.SubElement(item, qti12_tag("itemmetadata"))
+	qtimetadata = ET.SubElement(itemmetadata, qti12_tag("qtimetadata"))
 	for field_label, field_entry in (
-		("question_type", q_type_entry),
+		("question_type", "multiple_choice_question" if mode == "single" else "multiple_answers_question"),
 		("points_possible", str(points)),
 	):
-		field = ET.SubElement(qtimetadata, "qtimetadatafield")
-		ET.SubElement(field, "fieldlabel").text = field_label
-		ET.SubElement(field, "fieldentry").text = field_entry
+		field = ET.SubElement(qtimetadata, qti12_tag("qtimetadatafield"))
+		ET.SubElement(field, qti12_tag("fieldlabel")).text = field_label
+		ET.SubElement(field, qti12_tag("fieldentry")).text = field_entry
 
-	presentation = ET.SubElement(item, "presentation")
-	material = ET.SubElement(presentation, "material")
-	mattext = ET.SubElement(material, "mattext", {"texttype": "text/html"})
-	mattext.text = str(question.get("question_text") or "")
+	presentation = ET.SubElement(item, qti12_tag("presentation"))
+	q_material = ET.SubElement(presentation, qti12_tag("material"))
+	ET.SubElement(q_material, qti12_tag("mattext"), {"texttype": "text/html"}).text = str(question.get("question_text") or "")
 
 	response_lid = ET.SubElement(
 		presentation,
-		"response_lid",
-		{
-			"ident": "response1",
-			"rcardinality": "Single" if mode == "single" else "Multiple",
-		},
+		qti12_tag("response_lid"),
+		{"ident": "response1", "rcardinality": "Single" if mode == "single" else "Multiple"},
 	)
-	render_choice = ET.SubElement(response_lid, "render_choice")
+	render_choice = ET.SubElement(response_lid, qti12_tag("render_choice"))
 	for answer in answer_entries:
-		response_label = ET.SubElement(render_choice, "response_label", {"ident": answer["ident"]})
-		add_mattext(response_label, answer["text"])
+		response_label = ET.SubElement(render_choice, qti12_tag("response_label"), {"ident": answer["ident"]})
+		a_material = ET.SubElement(response_label, qti12_tag("material"))
+		ET.SubElement(a_material, qti12_tag("mattext"), {"texttype": "text/plain"}).text = answer["text"]
 
-	resprocessing = ET.SubElement(item, "resprocessing")
-	outcomes = ET.SubElement(resprocessing, "outcomes")
+	resprocessing = ET.SubElement(item, qti12_tag("resprocessing"))
+	outcomes = ET.SubElement(resprocessing, qti12_tag("outcomes"))
 	ET.SubElement(
 		outcomes,
-		"decvar",
-		{
-			"varname": "SCORE",
-			"vartype": "Decimal",
-			"minvalue": "0",
-			"maxvalue": str(points),
-		},
+		qti12_tag("decvar"),
+		{"varname": "SCORE", "vartype": "Decimal", "minvalue": "0", "maxvalue": str(points), "defaultval": "0"},
 	)
 
-	respcondition = ET.SubElement(resprocessing, "respcondition", {"continue": "No"})
-	conditionvar = ET.SubElement(respcondition, "conditionvar")
+	respcondition = ET.SubElement(resprocessing, qti12_tag("respcondition"), {"continue": "No"})
+	conditionvar = ET.SubElement(respcondition, qti12_tag("conditionvar"))
 
 	if mode == "single":
 		correct_ident = next((a["ident"] for a in answer_entries if a["is_correct"]), None)
 		if not correct_ident:
 			return None
-		varequal = ET.SubElement(conditionvar, "varequal", {"respident": "response1"})
+		varequal = ET.SubElement(conditionvar, qti12_tag("varequal"), {"respident": "response1"})
 		varequal.text = correct_ident
 	else:
-		and_node = ET.SubElement(conditionvar, "and")
+		and_node = ET.SubElement(conditionvar, qti12_tag("and"))
 		for answer in answer_entries:
 			if answer["is_correct"]:
-				varequal = ET.SubElement(and_node, "varequal", {"respident": "response1"})
+				varequal = ET.SubElement(and_node, qti12_tag("varequal"), {"respident": "response1"})
 				varequal.text = answer["ident"]
 			else:
-				not_node = ET.SubElement(and_node, "not")
-				varequal = ET.SubElement(not_node, "varequal", {"respident": "response1"})
+				not_node = ET.SubElement(and_node, qti12_tag("not"))
+				varequal = ET.SubElement(not_node, qti12_tag("varequal"), {"respident": "response1"})
 				varequal.text = answer["ident"]
 
-	setvar = ET.SubElement(respcondition, "setvar", {"action": "Set", "varname": "SCORE"})
-	setvar.text = str(points)
+	ET.SubElement(respcondition, qti12_tag("setvar"), {"action": "Set", "varname": "SCORE"}).text = str(points)
 
 	feedback_html = str(question.get("feedback") or "").strip()
 	if feedback_html:
-		ET.SubElement(respcondition, "displayfeedback", {"feedbacktype": "Response", "linkrefid": "general_fb"})
-		itemfeedback = ET.SubElement(item, "itemfeedback", {"ident": "general_fb"})
-		flow_mat = ET.SubElement(itemfeedback, "flow_mat")
-		add_mattext(flow_mat, feedback_html)
+		ET.SubElement(respcondition, qti12_tag("displayfeedback"), {"feedbacktype": "Response", "linkrefid": "general_fb"})
+		itemfeedback = ET.SubElement(item, qti12_tag("itemfeedback"), {"ident": "general_fb", "view": "All"})
+		flow_mat = ET.SubElement(itemfeedback, qti12_tag("flow_mat"))
+		f_material = ET.SubElement(flow_mat, qti12_tag("material"))
+		ET.SubElement(f_material, qti12_tag("mattext"), {"texttype": "text/html"}).text = feedback_html
 
 	return item
 
 
-def build_canvas_qti_zip(quiz_payload: dict) -> tuple[bytes, dict]:
+def build_canvas_qti12_zip(quiz_payload: dict) -> tuple[bytes, dict]:
+	ET.register_namespace("", QTI12_NAMESPACE)
+	ET.register_namespace("xsi", XSI_NAMESPACE)
+
 	assessment_ident = qti_safe_ident(quiz_payload.get("assessment_id", "quiz"), "quiz")
 	assessment_title = str(quiz_payload.get("quiz_title") or "Untitled Quiz")
 
-	questestinterop = ET.Element("questestinterop")
+	questestinterop = ET.Element(
+		qti12_tag("questestinterop"),
+		{f"{{{XSI_NAMESPACE}}}schemaLocation": f"{QTI12_NAMESPACE} {QTI12_SCHEMA}"},
+	)
 	assessment = ET.SubElement(
 		questestinterop,
-		"assessment",
+		qti12_tag("assessment"),
 		{"ident": assessment_ident, "title": assessment_title},
 	)
 
-	assessment_metadata = ET.SubElement(assessment, "qtimetadata")
+	assessment_metadata = ET.SubElement(assessment, qti12_tag("qtimetadata"))
 	for field_label, field_entry in (
 		("cc_profile", "cc.qti.quiz"),
 		("qmd_assessmenttype", "Examination"),
 	):
-		field = ET.SubElement(assessment_metadata, "qtimetadatafield")
-		ET.SubElement(field, "fieldlabel").text = field_label
-		ET.SubElement(field, "fieldentry").text = field_entry
+		field = ET.SubElement(assessment_metadata, qti12_tag("qtimetadatafield"))
+		ET.SubElement(field, qti12_tag("fieldlabel")).text = field_label
+		ET.SubElement(field, qti12_tag("fieldentry")).text = field_entry
 
 	root_section = ET.SubElement(
 		assessment,
-		"section",
+		qti12_tag("section"),
 		{"ident": f"root_{assessment_ident}", "title": assessment_title},
 	)
 
@@ -370,49 +378,54 @@ def build_canvas_qti_zip(quiz_payload: dict) -> tuple[bytes, dict]:
 		group_title = str(group.get("title") or f"Question Group {group_index + 1}")
 		group_section = ET.SubElement(
 			root_section,
-			"section",
+			qti12_tag("section"),
 			{"ident": f"group_{group_index + 1}", "title": group_title},
 		)
 
+		group_items: list[ET.Element] = []
 		for question_index, question in enumerate(group.get("questions", [])):
-			item = build_qti_item(question, group_index, question_index)
+			item = build_qti12_item(question, question_index)
 			if item is None:
 				skipped_items.append(
 					f"{group_title} / {question.get('title', f'Question {question_index + 1}')}: unsupported or incomplete"
 				)
 				continue
+			group_items.append(item)
 
+		if group_items:
+			selection_ordering = ET.SubElement(group_section, qti12_tag("selection_ordering"))
+			selection = ET.SubElement(selection_ordering, qti12_tag("selection"))
+
+			raw_pick = group.get("pick_count", len(group_items))
+			try:
+				pick_count = max(1, min(len(group_items), int(raw_pick)))
+			except Exception:
+				pick_count = len(group_items)
+
+			ET.SubElement(selection, qti12_tag("selection_number")).text = str(pick_count)
+			selection_ext = ET.SubElement(selection, qti12_tag("selection_extension"))
+			ET.SubElement(selection_ext, qti12_tag("points_per_item")).text = str(float(group.get("points_per_item", 0.0)))
+
+		for item in group_items:
 			group_section.append(item)
 			exported_count += 1
 
 	assessment_filename = "assessment.xml"
-	manifest_ident = f"man_{assessment_ident}"
-	resource_ident = f"res_{assessment_ident}"
-
 	manifest = ET.Element(
 		"manifest",
 		{
-			"identifier": manifest_ident,
+			"identifier": f"man_{assessment_ident}",
 			"xmlns": "http://www.imsglobal.org/xsd/imscp_v1p1",
-			"xmlns:imsmd": "http://www.imsglobal.org/xsd/imsmd_v1p2",
 			"xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
 			"xsi:schemaLocation": "http://www.imsglobal.org/xsd/imscp_v1p1 http://www.imsglobal.org/xsd/imscp_v1p1.xsd",
 		},
 	)
-	manifest_metadata = ET.SubElement(manifest, "metadata")
-	ET.SubElement(manifest_metadata, "schema").text = "IMS Content"
-	ET.SubElement(manifest_metadata, "schemaversion").text = "1.1.3"
 	ET.SubElement(manifest, "organizations")
-
 	resources = ET.SubElement(manifest, "resources")
 	resource = ET.SubElement(
 		resources,
 		"resource",
-		{
-			"identifier": resource_ident,
-			"type": "imsqti_xmlv1p2",
-			"href": assessment_filename,
-		},
+		{"identifier": f"res_{assessment_ident}", "type": "imsqti_xmlv1p2", "href": assessment_filename},
 	)
 	ET.SubElement(resource, "file", {"href": assessment_filename})
 
@@ -646,7 +659,7 @@ st.session_state.json_box = preview_text
 st.sidebar.header("Quiz JSON")
 st.sidebar.text_area("Quiz JSON", key="json_box", height=420, label_visibility="collapsed")
 
-qti_zip_data, qti_summary = build_canvas_qti_zip(export_quiz_payload(st.session_state.quiz_data))
+qti_zip_data, qti_summary = build_canvas_qti12_zip(export_quiz_payload(st.session_state.quiz_data))
 
 col_apply, col_dl = st.sidebar.columns(2)
 with col_apply:
@@ -667,9 +680,9 @@ with col_dl:
 	)
 
 st.sidebar.download_button(
-	label="Download QTI (Canvas)",
+	label="Download QTI (Canvas groups)",
 	data=qti_zip_data,
-	file_name=f"{qti_safe_ident(st.session_state.quiz_data.get('assessment_id', 'quiz'), 'quiz')}_qti.zip",
+	file_name=f"{qti_safe_ident(st.session_state.quiz_data.get('assessment_id', 'quiz'), 'quiz')}_qti12.zip",
 	mime="application/zip",
 	use_container_width=True,
 )
