@@ -2,11 +2,13 @@ import streamlit as st
 
 from lib.qti import build_canvas_qti12_zip, parse_qti12_zip, qti_safe_ident
 from lib.quiz import (
+	build_docx_answer_key_export,
 	build_docx_export,
 	default_answer,
 	default_question,
 	estimate_docx_sheet_count,
 	export_quiz_payload,
+	generate_permutation_seed,
 	load_json_text,
 	normalize_quiz,
 	refresh_preview,
@@ -318,6 +320,9 @@ def collect_docx_export_errors(quiz_for_export: dict) -> list[str]:
 @st.dialog("Export Quiz to DOCX")
 def show_docx_export_dialog() -> None:
 	st.caption("Orientation: Portrait = Vertical, Landscape = Horizontal")
+	if st.session_state.docx_permutation_seed is None:
+		st.session_state.docx_permutation_seed = generate_permutation_seed()
+
 	orientation = st.radio(
 		"Document orientation",
 		options=["Portrait", "Landscape"],
@@ -340,6 +345,8 @@ def show_docx_export_dialog() -> None:
 			key="docx_permutations",
 		)
 	)
+	seed_hex = f"{int(st.session_state.docx_permutation_seed):x}"
+	st.caption(f"Seed (hex): {seed_hex}")
 
 	errors = collect_docx_export_errors(quiz_payload)
 	if errors:
@@ -363,6 +370,7 @@ def show_docx_export_dialog() -> None:
 		orientation=orientation,
 		questions_per_page=questions_per_page,
 		permutations=permutations,
+		permutation_seed=int(st.session_state.docx_permutation_seed),
 	)
 	st.download_button(
 		label="Download DOCX",
@@ -372,8 +380,27 @@ def show_docx_export_dialog() -> None:
 		use_container_width=True,
 	)
 
+	answer_key_data = build_docx_answer_key_export(
+		quiz_payload,
+		orientation=orientation,
+		permutations=permutations,
+		permutation_seed=int(st.session_state.docx_permutation_seed),
+	)
+	st.download_button(
+		label="Download Answer Key DOCX",
+		data=answer_key_data,
+		file_name=f"{qti_safe_ident(st.session_state.quiz_data.get('assessment_id', 'quiz'), 'quiz')}_answer_key.docx",
+		mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		use_container_width=True,
+	)
+
+	if st.button("Regenerate permutation IDs", use_container_width=True):
+		st.session_state.docx_permutation_seed = generate_permutation_seed()
+		st.rerun()
+
 	if st.button("Close", use_container_width=True):
 		st.session_state.show_docx_dialog = False
+		st.session_state.docx_permutation_seed = None
 		st.rerun()
 
 
@@ -383,6 +410,7 @@ if st.sidebar.button("Export to DOCX", use_container_width=True):
 		for error in docx_errors:
 			st.sidebar.error(error)
 	else:
+		st.session_state.docx_permutation_seed = generate_permutation_seed()
 		st.session_state.show_docx_dialog = True
 
 if st.session_state.show_docx_dialog:

@@ -1,6 +1,7 @@
 import json
 import random
 import re
+import secrets
 import uuid
 from html import unescape
 from io import BytesIO
@@ -276,6 +277,78 @@ def _flatten_questions_for_permutation(quiz_payload: dict) -> list[tuple[int, st
 	return flattened
 
 
+def generate_permutation_seed() -> int:
+	return secrets.randbits(64)
+
+
+def format_permutation_id(seed: int, permutation_number: int) -> str:
+	return f"{int(seed):x}&{int(permutation_number):x}"
+
+
+def parse_permutation_id(permutation_id: str) -> tuple[int, int]:
+	parts = str(permutation_id).strip().split("&")
+	if len(parts) != 2:
+		raise ValueError("Invalid permutation ID format. Expected '<seed_hex>&<permutation_hex>'.")
+	try:
+		seed = int(parts[0], 16)
+		permutation_number = int(parts[1], 16)
+	except ValueError as exc:
+		raise ValueError("Permutation ID contains non-hex values.") from exc
+	if permutation_number < 1:
+		raise ValueError("Permutation number in permutation ID must be >= 1.")
+	return seed, permutation_number
+
+
+def _flatten_questions_for_permutation_id(
+	quiz_payload: dict,
+	seed: int,
+	permutation_number: int,
+) -> list[tuple[int, str, dict]]:
+	flattened: list[tuple[int, str, dict]] = []
+	number = 1
+	rng = random.Random(f"{int(seed):x}:{int(permutation_number):x}")
+
+	for group_index, group in enumerate(quiz_payload.get("question_groups", [])):
+		group_title = str(group.get("title") or f"Question Group {group_index + 1}")
+		group_questions = list(group.get("questions", []))
+		pick_count = _group_selection_count(group, group_index)
+
+		if pick_count == len(group_questions):
+			selected_questions = group_questions
+		else:
+			picked_indexes = sorted(rng.sample(range(len(group_questions)), pick_count))
+			selected_questions = [group_questions[index] for index in picked_indexes]
+
+		for question in selected_questions:
+			flattened.append((number, group_title, question))
+			number += 1
+
+	return flattened
+
+
+def _build_permutation_plan(quiz_payload: dict, permutations: int, seed: int | None = None) -> tuple[int, list[dict]]:
+	permutation_count = max(1, int(permutations or 1))
+	resolved_seed = int(seed if seed is not None else generate_permutation_seed())
+	plans: list[dict] = []
+
+	for permutation_number in range(1, permutation_count + 1):
+		permutation_id = format_permutation_id(resolved_seed, permutation_number)
+		flattened_questions = _flatten_questions_for_permutation_id(
+			quiz_payload,
+			resolved_seed,
+			permutation_number,
+		)
+		plans.append(
+			{
+				"permutation_number": permutation_number,
+				"permutation_id": permutation_id,
+				"flattened_questions": flattened_questions,
+			}
+		)
+
+	return resolved_seed, plans
+
+
 def _greedy_paginate_questions(flattened_questions: list[tuple[int, str, dict]], questions_per_page: int) -> list[list[tuple[int, str, dict]]]:
 	per_page = max(1, int(questions_per_page or 1))
 	pages: list[list[tuple[int, str, dict]]] = []
@@ -332,22 +405,33 @@ def _apply_orientation(document: Document, orientation: str) -> None:
 		cols.set(qn("w:num"), "1")
 
 
-def build_docx_export(quiz_payload: dict, orientation: str, questions_per_page: int, permutations: int = 1) -> bytes:
+def build_docx_export(
+	quiz_payload: dict,
+	orientation: str,
+	questions_per_page: int,
+	permutations: int = 1,
+	permutation_seed: int | None = None,
+) -> bytes:
 	document = Document()
 	_apply_orientation(document, orientation)
 
 	quiz_title = str(quiz_payload.get("quiz_title") or "Untitled Quiz")
-	permutation_count = max(1, int(permutations or 1))
+	_, permutation_plans = _build_permutation_plan(
+		quiz_payload,
+		permutations=permutations,
+		seed=permutation_seed,
+	)
 
-	for permutation_index in range(permutation_count):
+	for permutation_index, plan in enumerate(permutation_plans):
 		if permutation_index > 0:
 			document.add_page_break()
 
 		document.add_heading(quiz_title, level=1)
+		document.add_paragraph(f"Permutation ID: {plan['permutation_id']}")
 		document.add_paragraph("Student ID: ____________________    Name: ____________________    Date: ____________________")
 		document.add_paragraph("")
 
-		flattened_questions = _flatten_questions_for_permutation(quiz_payload)
+		flattened_questions = plan["flattened_questions"]
 		pages = _greedy_paginate_questions(flattened_questions, questions_per_page)
 
 		if not flattened_questions:
@@ -398,6 +482,72 @@ def build_docx_export(quiz_payload: dict, orientation: str, questions_per_page: 
 
 			if page_index < len(pages) - 1:
 				document.add_page_break()
+
+	buffer = BytesIO()
+	document.save(buffer)
+	return buffer.getvalue()
+
+
+def build_docx_answer_key_export(
+	quiz_payload: dict,
+	orientation: str,
+	permutations: int = 1,
+	permutation_seed: int | None = None,
+) -> bytes:
+	document = Document()
+	_apply_orientation(document, orientation)
+
+	quiz_title = str(quiz_payload.get("quiz_title") or "Untitled Quiz")
+	_, permutation_plans = _build_permutation_plan(
+		quiz_payload,
+		permutations=permutations,
+		seed=permutation_seed,
+	)
+
+	for permutation_index, plan in enumerate(permutation_plans):
+		if permutation_index > 0:
+			document.add_page_break()
+
+		document.add_heading(f"{quiz_title} - Answer Key", level=1)
+		document.add_paragraph(f"Permutation ID: {plan['permutation_id']}")
+		document.add_paragraph("")
+
+		flattened_questions = plan["flattened_questions"]
+		if not flattened_questions:
+			document.add_paragraph("No questions available.")
+			continue
+
+		current_group = None
+		for question_number, group_title, question in flattened_questions:
+			if group_title != current_group:
+				group_paragraph = document.add_paragraph(group_title, style="Heading 2")
+				group_paragraph.paragraph_format.keep_with_next = True
+				group_paragraph.paragraph_format.keep_together = True
+				current_group = group_title
+
+			question_title = str(question.get("title") or f"Question {question_number}")
+			document.add_paragraph(f"{question_number}. {question_title}")
+
+			correct_ids = set(question.get("correct_answer_ids", []))
+			if not correct_ids:
+				document.add_paragraph("   Correct: (none)")
+				continue
+
+			correct_lines: list[str] = []
+			for answer_index, answer in enumerate(question.get("answers", [])):
+				answer_id = str(answer.get("id", ""))
+				if answer_id not in correct_ids:
+					continue
+				marker = chr(ord("A") + answer_index) if answer_index < 26 else str(answer_index + 1)
+				answer_text = _html_to_text(answer.get("text", ""))
+				correct_lines.append(f"{marker}. {answer_text}")
+
+			if correct_lines:
+				document.add_paragraph("   Correct: " + " | ".join(correct_lines))
+			else:
+				document.add_paragraph("   Correct: (none)")
+
+			document.add_paragraph("")
 
 	buffer = BytesIO()
 	document.save(buffer)
