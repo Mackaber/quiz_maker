@@ -439,29 +439,18 @@ def build_docx_export(
 			continue
 
 		for page_index, page_questions in enumerate(pages):
-			current_group = None
-			for question_number, group_title, question in page_questions:
-				if group_title != current_group:
-					group_paragraph = document.add_paragraph(group_title, style="Heading 2")
-					group_paragraph.paragraph_format.keep_with_next = True
-					group_paragraph.paragraph_format.keep_together = True
-					current_group = group_title
-
-				question_title = str(question.get("title") or f"Question {question_number}")
+			for question_number, _group_title, question in page_questions:
 				points = int(question.get("points", 0) or 0)
-
-				heading = document.add_paragraph()
-				heading.add_run(f"{question_number}. {question_title}").bold = True
-				if points > 0:
-					heading.add_run(f" ({points} pts)")
-				heading.paragraph_format.keep_with_next = True
-				heading.paragraph_format.keep_together = True
-
 				question_text = _html_to_text(question.get("question_text", ""))
+
+				question_paragraph = document.add_paragraph()
+				question_paragraph.add_run(f"{question_number}. ").bold = True
 				if question_text:
-					question_text_paragraph = document.add_paragraph(question_text)
-					question_text_paragraph.paragraph_format.keep_with_next = True
-					question_text_paragraph.paragraph_format.keep_together = True
+					question_paragraph.add_run(question_text)
+				if points > 0:
+					question_paragraph.add_run(f" ({points} pts)")
+				question_paragraph.paragraph_format.keep_with_next = True
+				question_paragraph.paragraph_format.keep_together = True
 
 				answer_paragraphs = []
 				for answer_index, answer in enumerate(question.get("answers", [])):
@@ -517,16 +506,9 @@ def build_docx_answer_key_export(
 			document.add_paragraph("No questions available.")
 			continue
 
-		current_group = None
-		for question_number, group_title, question in flattened_questions:
-			if group_title != current_group:
-				group_paragraph = document.add_paragraph(group_title, style="Heading 2")
-				group_paragraph.paragraph_format.keep_with_next = True
-				group_paragraph.paragraph_format.keep_together = True
-				current_group = group_title
-
-			question_title = str(question.get("title") or f"Question {question_number}")
-			document.add_paragraph(f"{question_number}. {question_title}")
+		for question_number, _group_title, question in flattened_questions:
+			question_text = _html_to_text(question.get("question_text", "")) or f"Question {question_number}"
+			document.add_paragraph(f"{question_number}. {question_text}")
 
 			correct_ids = set(question.get("correct_answer_ids", []))
 			if not correct_ids:
