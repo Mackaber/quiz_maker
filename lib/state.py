@@ -65,3 +65,6 @@ def initialize_session_state() -> None:
 
 	if "docx_permutation_seed" not in st.session_state:
 		st.session_state.docx_permutation_seed = None
+
+	if "docx_permutation_seed_input" not in st.session_state:
+		st.session_state.docx_permutation_seed_input = ""

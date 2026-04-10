@@ -256,11 +256,14 @@ for group_index, group in enumerate(quiz["question_groups"]):
 st.session_state.quiz_data = quiz
 
 preview_text = refresh_preview(st.session_state.quiz_data)
-user_input = st.session_state.get("json_box", preview_text)
-st.session_state.json_box = preview_text
+previous_preview_text = st.session_state.get("json_preview_text", "")
+if "json_box" not in st.session_state or st.session_state.get("json_box", "") == previous_preview_text:
+	st.session_state.json_box = preview_text
+st.session_state.json_preview_text = preview_text
 
 st.sidebar.header("Quiz JSON")
 st.sidebar.text_area("Quiz JSON", key="json_box", height=420, label_visibility="collapsed")
+user_input = st.session_state.get("json_box", preview_text)
 
 quiz_payload = export_quiz_payload(st.session_state.quiz_data)
 qti_zip_data, qti_summary = build_canvas_qti12_zip(quiz_payload)
@@ -271,7 +274,9 @@ with col_apply:
 		try:
 			set_quiz(load_json_text(user_input))
 			st.session_state.last_parse_error = ""
-			st.session_state.json_box = refresh_preview(st.session_state.quiz_data)
+			updated_preview = refresh_preview(st.session_state.quiz_data)
+			st.session_state.json_box = updated_preview
+			st.session_state.json_preview_text = updated_preview
 			st.rerun()
 		except Exception as exc:
 			st.session_state.last_parse_error = str(exc)
@@ -317,11 +322,35 @@ def collect_docx_export_errors(quiz_for_export: dict) -> list[str]:
 	return errors
 
 
+def set_docx_permutation_seed(seed: int | None = None) -> int:
+	resolved_seed = int(seed if seed is not None else generate_permutation_seed())
+	st.session_state.docx_permutation_seed = resolved_seed
+	st.session_state.docx_permutation_seed_input = f"{resolved_seed:x}"
+	return resolved_seed
+
+
+def parse_docx_permutation_seed(seed_hex: str) -> int:
+	normalized = str(seed_hex or "").strip().lower()
+	if normalized.startswith("0x"):
+		normalized = normalized[2:]
+	if not normalized:
+		raise ValueError("Seed is required.")
+	try:
+		seed = int(normalized, 16)
+	except ValueError as exc:
+		raise ValueError("Seed must be a hexadecimal value.") from exc
+	if seed < 0:
+		raise ValueError("Seed must be non-negative.")
+	return seed
+
+
 @st.dialog("Export Quiz to DOCX")
 def show_docx_export_dialog() -> None:
 	st.caption("Orientation: Portrait = Vertical, Landscape = Horizontal")
 	if st.session_state.docx_permutation_seed is None:
-		st.session_state.docx_permutation_seed = generate_permutation_seed()
+		set_docx_permutation_seed()
+	elif not str(st.session_state.docx_permutation_seed_input or "").strip():
+		st.session_state.docx_permutation_seed_input = f"{int(st.session_state.docx_permutation_seed):x}"
 
 	orientation = st.radio(
 		"Document orientation",
@@ -345,8 +374,19 @@ def show_docx_export_dialog() -> None:
 			key="docx_permutations",
 		)
 	)
-	seed_hex = f"{int(st.session_state.docx_permutation_seed):x}"
-	st.caption(f"Seed (hex): {seed_hex}")
+	seed_error = ""
+	resolved_seed: int | None = None
+	seed_input = st.text_input(
+		"Permutation seed (hex)",
+		key="docx_permutation_seed_input",
+		help="Use the platform seed to reproduce a specific permutation set.",
+	)
+	try:
+		resolved_seed = parse_docx_permutation_seed(seed_input)
+		st.session_state.docx_permutation_seed = resolved_seed
+	except ValueError as exc:
+		seed_error = str(exc)
+		st.error(seed_error)
 
 	errors = collect_docx_export_errors(quiz_payload)
 	if errors:
@@ -364,43 +404,44 @@ def show_docx_export_dialog() -> None:
 		permutations=permutations,
 	)
 	st.info(f"Estimated sheets: {estimated_sheets}")
+	if resolved_seed is not None:
+		docx_data = build_docx_export(
+			quiz_payload,
+			orientation=orientation,
+			questions_per_page=questions_per_page,
+			permutations=permutations,
+			permutation_seed=resolved_seed,
+		)
+		st.download_button(
+			label="Download DOCX",
+			data=docx_data,
+			file_name=f"{qti_safe_ident(st.session_state.quiz_data.get('assessment_id', 'quiz'), 'quiz')}.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			use_container_width=True,
+		)
 
-	docx_data = build_docx_export(
-		quiz_payload,
-		orientation=orientation,
-		questions_per_page=questions_per_page,
-		permutations=permutations,
-		permutation_seed=int(st.session_state.docx_permutation_seed),
-	)
-	st.download_button(
-		label="Download DOCX",
-		data=docx_data,
-		file_name=f"{qti_safe_ident(st.session_state.quiz_data.get('assessment_id', 'quiz'), 'quiz')}.docx",
-		mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		use_container_width=True,
-	)
-
-	answer_key_data = build_docx_answer_key_export(
-		quiz_payload,
-		orientation=orientation,
-		permutations=permutations,
-		permutation_seed=int(st.session_state.docx_permutation_seed),
-	)
-	st.download_button(
-		label="Download Answer Key DOCX",
-		data=answer_key_data,
-		file_name=f"{qti_safe_ident(st.session_state.quiz_data.get('assessment_id', 'quiz'), 'quiz')}_answer_key.docx",
-		mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		use_container_width=True,
-	)
+		answer_key_data = build_docx_answer_key_export(
+			quiz_payload,
+			orientation=orientation,
+			permutations=permutations,
+			permutation_seed=resolved_seed,
+		)
+		st.download_button(
+			label="Download Answer Key DOCX",
+			data=answer_key_data,
+			file_name=f"{qti_safe_ident(st.session_state.quiz_data.get('assessment_id', 'quiz'), 'quiz')}_answer_key.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			use_container_width=True,
+		)
 
 	if st.button("Regenerate permutation IDs", use_container_width=True):
-		st.session_state.docx_permutation_seed = generate_permutation_seed()
+		set_docx_permutation_seed()
 		st.rerun()
 
 	if st.button("Close", use_container_width=True):
 		st.session_state.show_docx_dialog = False
 		st.session_state.docx_permutation_seed = None
+		st.session_state.docx_permutation_seed_input = ""
 		st.rerun()
 
 
@@ -410,7 +451,7 @@ if st.sidebar.button("Export to DOCX", use_container_width=True):
 		for error in docx_errors:
 			st.sidebar.error(error)
 	else:
-		st.session_state.docx_permutation_seed = generate_permutation_seed()
+		set_docx_permutation_seed()
 		st.session_state.show_docx_dialog = True
 
 if st.session_state.show_docx_dialog:
