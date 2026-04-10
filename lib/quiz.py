@@ -405,6 +405,18 @@ def _apply_orientation(document: Document, orientation: str) -> None:
 		cols.set(qn("w:num"), "1")
 
 
+def _shuffled_answers_for_docx(question: dict, permutation_id: str) -> list[dict]:
+	answers = list(question.get("answers", []))
+	if len(answers) < 2:
+		return answers
+
+	question_id = str(question.get("id", ""))
+	question_text = str(question.get("question_text", ""))
+	rng = random.Random(f"{permutation_id}:{question_id}:{question_text}")
+	rng.shuffle(answers)
+	return answers
+
+
 def build_docx_export(
 	quiz_payload: dict,
 	orientation: str,
@@ -442,6 +454,7 @@ def build_docx_export(
 			for question_number, _group_title, question in page_questions:
 				points = int(question.get("points", 0) or 0)
 				question_text = _html_to_text(question.get("question_text", ""))
+				shuffled_answers = _shuffled_answers_for_docx(question, plan["permutation_id"])
 
 				question_paragraph = document.add_paragraph()
 				question_paragraph.add_run(f"{question_number}. ").bold = True
@@ -453,7 +466,7 @@ def build_docx_export(
 				question_paragraph.paragraph_format.keep_together = True
 
 				answer_paragraphs = []
-				for answer_index, answer in enumerate(question.get("answers", [])):
+				for answer_index, answer in enumerate(shuffled_answers):
 					marker = chr(ord("A") + answer_index) if answer_index < 26 else str(answer_index + 1)
 					answer_text = _html_to_text(answer.get("text", ""))
 					answer_paragraph = document.add_paragraph(f"{marker}. {answer_text}")
@@ -507,6 +520,7 @@ def build_docx_answer_key_export(
 			continue
 
 		for question_number, _group_title, question in flattened_questions:
+			shuffled_answers = _shuffled_answers_for_docx(question, plan["permutation_id"])
 			question_text = _html_to_text(question.get("question_text", "")) or f"Question {question_number}"
 			document.add_paragraph(f"{question_number}. {question_text}")
 
@@ -516,7 +530,7 @@ def build_docx_answer_key_export(
 				continue
 
 			correct_lines: list[str] = []
-			for answer_index, answer in enumerate(question.get("answers", [])):
+			for answer_index, answer in enumerate(shuffled_answers):
 				answer_id = str(answer.get("id", ""))
 				if answer_id not in correct_ids:
 					continue
